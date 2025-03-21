@@ -12,7 +12,8 @@ from mcp.types import ListPromptsRequest, ListResourcesRequest, ListToolsRequest
 from openai import OpenAI
 from dotenv import load_dotenv
 import json
-from utils import logger
+from mcpomni_connect.utils import logger
+from mcp.client.websocket import websocket_client
 
 
 class Configuration:
@@ -100,41 +101,79 @@ class MCPClient:
             return None
 
     async def connect_to_servers(self):
-        """Connect to an MCP server
-
-        Args:
-            server_script_path: Path to the server script (.py)
-        """
+        """Connect to an MCP server"""
         server_config = self.config.load_config("servers_config.json")
         servers = [{"name": name, "srv_config": srv_config} for name, srv_config in server_config["mcpServers"].items()]
-        # create tasks for connecting to each server
-        # issue using for loops works and exist_stack closed but using asyncio.gather does not work
-        for server in servers:
-            await self._connect_to_single_server(server)
-        # connections_tasks = []
-        # for server in servers:
-        #     task = asyncio.create_task(self._connect_to_single_server(server))
-        #     connections_tasks.append(task)
-        # # wait for all connections to complete
-        # await asyncio.gather(*connections_tasks)
         
+        successful_connections = 0
+        failed_connections = []
+
+        logger.info(f"Attempting to connect to {len(servers)} servers")
+        
+        for server in servers:
+            try:
+                await self._connect_to_single_server(server)
+                successful_connections += 1
+                logger.info(f"Successfully connected to server: {server.get('name', 'Unknown')}")
+            except Exception as e:
+                failed_server = server.get('name', 'Unknown')
+                error_msg = f"Failed to connect to server {failed_server}: {str(e)}"
+                logger.error(error_msg)
+                failed_connections.append((failed_server, str(e)))
+                continue  # Continue with next server
+        
+        # Log summary of connections
+        logger.info(f"MCP Servers Connection summary: {successful_connections} servers connected, {len(failed_connections)} servers failed to connect")
+        if failed_connections:
+            logger.info("Failed connections:")
+            for server, error in failed_connections:
+                logger.info(f"  - {server}: {error}")
+        
+        if successful_connections == 0:
+            raise RuntimeError("No servers could be connected. All connection attempts failed.")
+        
+        return successful_connections
+
+    def _validate_and_convert_url(self, url: str, connection_type: str) -> str:
+        """Validate and convert URL based on connection type."""
+        if connection_type == "sse":
+            if not url.startswith(("http://", "https://")):
+                raise ValueError(f"Invalid SSE URL: {url}. Must start with http:// or https://")
+            return url
+        elif connection_type == "websocket":
+            if not url.startswith(("ws://", "wss://")):
+                raise ValueError(f"Invalid WebSocket URL: {url}. Must start with ws:// or wss://")
+            return url
+        else:
+            raise ValueError(f"Invalid connection type: {connection_type}. Must be sse or websocket")
+
     async def _connect_to_single_server(self, server):
         try:
-            if server["srv_config"].get("type") == "sse":
-                # SSE connection
-                url = server["srv_config"]["url"]
+            connection_type = server["srv_config"].get("type", "stdio")
+            logger.info(f"connection_type: {connection_type}")
+            if connection_type == "sse":
+                url = self._validate_and_convert_url(server["srv_config"]["url"], "sse")
                 headers = server["srv_config"].get("headers", {})
                 timeout = server["srv_config"].get("timeout", 5)
                 sse_read_timeout = server["srv_config"].get("sse_read_timeout", 300)
+                
                 if self.debug:
-                    logger.info(f"SSE connection to {url} with timeout {timeout} and sse_read_timeout {sse_read_timeout}")
+                    logger.info(f"SSE connection to {url} with timeout {timeout}")
 
-                # initialize sse transport
-                sse_transport = await self.exit_stack.enter_async_context(
+                transport = await self.exit_stack.enter_async_context(
                     sse_client(url, headers=headers, timeout=timeout, sse_read_timeout=sse_read_timeout)
                 )
-                read_stream, write_stream = sse_transport
-                session = await self.exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
+                
+            elif connection_type == "websocket":
+                url = self._validate_and_convert_url(server["srv_config"]["url"], "websocket")
+                logger.info(f"WebSocket connection to {url}")
+                if self.debug:
+                    logger.info(f"WebSocket connection to {url}")
+                    
+                transport = await self.exit_stack.enter_async_context(
+                    websocket_client(url)
+                )
+                
             else:
                 # stdio connection (default)
                 args = server["srv_config"]["args"]
@@ -146,58 +185,101 @@ class MCPClient:
                     env=env
                 )
 
-                # initialize stdio transport
-                stdio_transport = await self.exit_stack.enter_async_context(stdio_client(server_params))
-                read_stream, write_stream = stdio_transport
-                session = await self.exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
+                transport = await self.exit_stack.enter_async_context(stdio_client(server_params))
 
-            # initialize the session
+            read_stream, write_stream = transport
+            session = await self.exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
             init_result = await session.initialize()
             server_name = init_result.serverInfo.name
             capabilities = init_result.capabilities
             self.server_names.append(server_name)
             
-            # store the session
             self.sessions[server_name] = {
                 "session": session,
                 "read_stream": read_stream,
                 "write_stream": write_stream,
                 "connected": True,
-                "capabilities": capabilities
+                "capabilities": capabilities,
+                "type": connection_type
             }
+            
             if self.debug:
-                logger.info(f"Connected to server: {server_name} v{init_result.serverInfo.version}")
-            # refresh capabilities and cache available tools
-            await self.refresh_capabilities()
+                logger.info(f"Successfully connected to {server_name} via {connection_type}")
+                
         except Exception as e:
-            logger.error(f"Error connecting to server: {e}")
-           
+            if self.debug:
+                logger.error(f"Failed to connect to server: {str(e)}")
+            raise
+        
     async def clean_up_server(self):
         """Clean up server connections individually"""
         for server_name in list(self.server_names):
-            async with self._cleanup_lock:
+            try:
                 if server_name in self.sessions and self.sessions[server_name]["connected"]:
-                    await self.exit_stack.aclose()
+                    session_info = self.sessions[server_name]
+                    try:
+                        if session_info["write_stream"] and not session_info["write_stream"]._closed:
+                            await session_info["write_stream"].aclose()
+                            if self.debug:
+                                logger.info(f"Closed write stream for {server_name}")
+                            
+                        if session_info["read_stream"] and not session_info["read_stream"]._closed:
+                            await session_info["read_stream"].aclose()
+                            if self.debug:
+                                logger.info(f"Closed read stream for {server_name}")
+                            
+                        if session_info["session"]:
+                            close_method = getattr(session_info["session"], "close", None)
+                            if close_method and callable(close_method):
+                                await close_method()
+                                if self.debug:
+                                    logger.info(f"Closed session for {server_name}")
+                        
+                    except Exception as e:
+                        logger.error(f"Error during stream closure for {server_name}: {e}")
+                    
                     # Mark as disconnected and clear references
                     self.sessions[server_name]["connected"] = False
                     self.sessions[server_name]["session"] = None
                     self.sessions[server_name]["read_stream"] = None
                     self.sessions[server_name]["write_stream"] = None
+                    
+                    if self.debug:
+                        logger.info(f"Cleaned up server: {server_name}")
+            except Exception as e:
+                logger.error(f"Error cleaning up server {server_name}: {e}")
             
     async def cleanup(self):
         """Clean up all resources"""
         try:
+            logger.info("Starting client shutdown...")
+            
             # First make sure all servers are properly shut down
-            await self.clean_up_server()
+            try:
+                async with asyncio.timeout(10.0):  # 5 second timeout for server cleanup
+                    await self.clean_up_server()
+            except asyncio.TimeoutError:
+                logger.warning("Server cleanup timed out")
+            except Exception as e:
+                logger.error(f"Error during server cleanup: {e}")
+            
+            
+            try:
+                await self.clean_up_server()
+                await self.exit_stack.aclose()
+            except Exception as e:
+                logger.error(f"Error closing exit stack: {e}")
+            
             # Clear any remaining data structures
-            self.server_names = []
-            self.available_tools = {}
-            self.available_resources = {}
-            self.available_prompts = {}
+            self.server_names.clear()
+            self.sessions.clear()
+            self.available_tools.clear()
+            self.available_resources.clear()
+            self.available_prompts.clear()
+            
+            logger.info("All resources cleared")
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")
-        finally:
-            logger.info("Client shutdown complete")
 
     async def refresh_capabilities(self):
         """Refresh the capabilities of the server and update system prompt"""

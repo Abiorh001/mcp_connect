@@ -1,13 +1,61 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
-name = "mcp-omni-connect"
+name = "mcpomni_connect"
 version = "0.1.0"
-description = "Add your description here"
+description = "Universal MCP Client with multi-transport support and LLM-powered tool routing"
 readme = "README.md"
-requires-python = ">=3.12"
+authors = [{ name = "Abiola Adeshina", email = "abiolaadedayo1993@gmail.com" }]
+requires-python = ">=3.10"
+
+keywords = ["git", "mcp", "llm", "automation"]
+license = { text = "MIT" }
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
 dependencies = [
     "colorlog>=6.9.0",
     "mcp[cli]>=1.4.1",
     "openai>=1.67.0",
     "python-dotenv>=1.0.1",
     "rich>=13.9.4",
+    "websockets>=15.0.1",
+    "httpx>=0.26.0",
+    "httpx-sse>=0.4.0",
+    "pydantic>=2.6.0",
+    "anyio>=4.2.0",
+    "twine>=6.1.0",
 ]
+
+[project.scripts]
+mcpomni_connect = "mcpomni_connect.main:main"
+
+
+[project.urls]
+Repository = "https://github.com/Abiorh001/mcp_omni_connect"
+Issues = "https://github.com/Abiorh001/mcp_omni_connect/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcpomni_connect"]
+
+[tool.hatch.build]
+packages = ["src/mcpomni_connect"]
+include = [
+
+    "LICENSE",
+    "README.md"
+]
+
+
+
+[tool.uv.sources]
+mcpomni_connect = { workspace = true }

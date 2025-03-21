@@ -7,7 +7,7 @@ from rich.prompt import Prompt
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich import box
 from enum import Enum
-from client import MCPClient
+from mcpomni_connect.client import MCPClient
 from rich import print as rprint
 from typing import Optional, Dict, Any
 import json
@@ -570,7 +570,7 @@ class MCPClientCLI:
         self.console.print(Panel(
             content,
             title="[bold blue]⚡ MCPOmni Connect ⚡[/]",
-            subtitle="[bold cyan]v0.0.1[/]",
+            subtitle="[bold cyan]v0.1.0[/]",
             border_style="blue",
             box=box.DOUBLE_EDGE
         ))
